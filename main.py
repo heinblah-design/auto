@@ -14,12 +14,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.tl.custom.message import Message
+
+# Cap so a server-side ban (e.g. 24h FloodWait) can't tie up the event loop.
+MAX_FLOOD_WAIT_SECONDS = 600
+MAX_FLOOD_RETRIES = 5
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -53,6 +57,35 @@ def _matches(text: str | None, allow: list[str], block: list[str]) -> bool:
     if allow and not any(a in haystack for a in allow):
         return False
     return True
+
+
+async def _retry_on_flood(
+    op: Callable[[], Awaitable[None]],
+    label: str,
+) -> bool:
+    """Run `op()`, retrying after FloodWait. Returns True on success.
+
+    Telethon delivers each event exactly once, so a handler that catches
+    FloodWaitError and returns silently drops the message. We retry instead.
+    """
+    for attempt in range(1, MAX_FLOOD_RETRIES + 1):
+        try:
+            await op()
+            return True
+        except FloodWaitError as fw:
+            if fw.seconds > MAX_FLOOD_WAIT_SECONDS:
+                log.error(
+                    "%s: FloodWait %ds exceeds cap %ds — dropping",
+                    label, fw.seconds, MAX_FLOOD_WAIT_SECONDS,
+                )
+                return False
+            log.warning(
+                "%s: FloodWait %ds (attempt %d/%d) — sleeping",
+                label, fw.seconds, attempt, MAX_FLOOD_RETRIES,
+            )
+            await asyncio.sleep(fw.seconds + 1)
+    log.error("%s: gave up after %d FloodWait retries", label, MAX_FLOOD_RETRIES)
+    return False
 
 
 async def _send_copy(
@@ -117,7 +150,12 @@ async def run() -> None:
 
     api_id = int(api_id_raw)
     sources = _parse_chats(sources_raw)
-    dest: str | int = _parse_chats(dest_raw)[0]
+    dest_parsed = _parse_chats(dest_raw)
+    if not dest_parsed:
+        raise SystemExit(
+            "DEST_CHAT could not be parsed; check the value in .env."
+        )
+    dest: str | int = dest_parsed[0]
 
     client = TelegramClient(session_name, api_id, api_hash)
     await client.start()  # type: ignore[func-returns-value]
@@ -145,18 +183,20 @@ async def run() -> None:
 
     @client.on(events.Album(chats=resolved_sources))
     async def on_album(event: events.Album.Event) -> None:
-        try:
-            text = event.messages[0].message or ""
-            if not _matches(text, allow, block):
-                return
+        text = event.messages[0].message or ""
+        if not _matches(text, allow, block):
+            return
+        label = f"album from chat {event.chat_id}"
+
+        async def _do() -> None:
             if mode == "forward":
                 await client.forward_messages(dest_entity, list(event.messages))
             else:
                 await _send_copy(client, dest_entity, event.messages, prefix, suffix)
-            log.info("Reposted album of %d messages from %s", len(event.messages), event.chat_id)
-        except FloodWaitError as fw:
-            log.warning("FloodWait %ds — sleeping", fw.seconds)
-            await asyncio.sleep(fw.seconds + 1)
+
+        try:
+            if await _retry_on_flood(_do, label):
+                log.info("Reposted album of %d messages from %s", len(event.messages), event.chat_id)
         except Exception:  # noqa: BLE001
             log.exception("Failed to repost album")
 
@@ -166,17 +206,19 @@ async def run() -> None:
         # Albums also fire NewMessage for each item; the Album handler covers them.
         if msg.grouped_id is not None:
             return
-        try:
-            if not _matches(msg.message, allow, block):
-                return
+        if not _matches(msg.message, allow, block):
+            return
+        label = f"message {msg.id} from chat {event.chat_id}"
+
+        async def _do() -> None:
             if mode == "forward":
                 await client.forward_messages(dest_entity, msg)
             else:
                 await _send_copy(client, dest_entity, [msg], prefix, suffix)
-            log.info("Reposted message %s from chat %s", msg.id, event.chat_id)
-        except FloodWaitError as fw:
-            log.warning("FloodWait %ds — sleeping", fw.seconds)
-            await asyncio.sleep(fw.seconds + 1)
+
+        try:
+            if await _retry_on_flood(_do, label):
+                log.info("Reposted %s", label)
         except Exception:  # noqa: BLE001
             log.exception("Failed to repost message")
 
