@@ -19,6 +19,7 @@ from typing import Awaitable, Callable, Iterable
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
+from telethon.sessions import StringSession
 from telethon.tl.custom.message import Message
 
 # Cap so a server-side ban (e.g. 24h FloodWait) can't tie up the event loop.
@@ -133,6 +134,7 @@ async def run() -> None:
     api_id_raw = os.environ.get("API_ID")
     api_hash = os.environ.get("API_HASH")
     session_name = os.environ.get("SESSION_NAME", "userbot")
+    session_string = os.environ.get("SESSION_STRING", "").strip()
     sources_raw = os.environ.get("SOURCE_CHATS", "")
     dest_raw = os.environ.get("DEST_CHAT", "")
     mode = os.environ.get("MODE", "copy").strip().lower()
@@ -157,7 +159,12 @@ async def run() -> None:
         )
     dest: str | int = dest_parsed[0]
 
-    client = TelegramClient(session_name, api_id, api_hash)
+    # SESSION_STRING wins when set (great for stateless hosts like Fly.io /
+    # Railway). Otherwise fall back to a local SQLite session file.
+    session: StringSession | str = (
+        StringSession(session_string) if session_string else session_name
+    )
+    client = TelegramClient(session, api_id, api_hash)
     await client.start()  # type: ignore[func-returns-value]
 
     me = await client.get_me()
