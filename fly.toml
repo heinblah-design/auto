@@ -1,0 +1,23 @@
+# fly.io config — single always-on VM with no exposed ports.
+# Override `app` to your own app name (must be globally unique on Fly).
+app = "auto-userbot"
+primary_region = "fra"  # change to your nearest region; see `fly platform regions`
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+# Userbot is outbound-only — no [http_service]; no public ports needed.
+# Keep exactly one Machine running 24/7. `auto_stop_machines = false` prevents
+# Fly's autoscaler from suspending it during quiet periods.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[deploy]
+  strategy = "immediate"
+
+[experimental]
+  auto_rollback = true

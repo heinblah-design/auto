@@ -9,6 +9,9 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py login.py ./
+COPY main.py login.py gen_session.py ./
+
+# Tell Python to flush logs immediately so `fly logs` / `docker logs` are live.
+ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "main.py"]
